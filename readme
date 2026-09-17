@@ -1,0 +1,287 @@
+# Reader
+
+Reader 是一个运行在终端中的 EPUB 小说阅读器，目标是提供适合长时间阅读的 TUI 界面，并支持中文小说的排版、目录导航、翻页和书签等功能。
+
+项目目前处于早期开发阶段，已经完成 EPUB 基础解析和阅读器原型，但 XHTML/HTML 内容仍以原始文本形式显示。
+
+## 当前功能
+
+- 使用 FTXUI 提供全屏 TUI 界面；
+- 扫描指定目录中的 EPUB 文件并显示书库；
+- 读取 EPUB 的 metadata、manifest、spine 和 EPUB 2 NCX 目录；
+- 读取 spine 中的 XHTML/HTML 原始内容；
+- 支持 UTF-8 和中文字符显示宽度计算；
+- 根据终端阅读区域的宽度和高度进行换行、分页；
+- 只渲染当前阅读页，避免每次重绘整本小说；
+- TOC 与章节页面绑定；
+- TOC 目录项过多时支持滚动显示；
+- 支持从 TOC 选择章节并切换到对应页面。
+
+目前尚未完成：
+
+- XHTML/HTML 标签解析和正文提取；
+- CSS 样式和图片渲染；
+- 书签持久化；
+- 阅读进度持久化；
+- 全文搜索；
+- 网络下载。
+
+## 技术栈
+
+- C++ 17
+- CMake
+- [FTXUI](https://github.com/ArthurSonzogni/FTXUI)：终端用户界面；
+- [libzip](https://libzip.org/)：读取 EPUB ZIP 归档；
+- [pugixml](https://pugixml.org/)：解析 XML、OPF 和 NCX。
+
+依赖由根目录的 `vcpkg.json` 管理。
+
+## 抽象层级
+
+当前代码大致分为 EPUB 解析层、EPUB 管理层和 TUI 界面层：
+
+```text
+main
+└── ui::application
+    ├── ui::library
+    ├── ui::reader
+    └── epub
+        └── epub_book
+            ├── epub_parser
+            │   └── pugixml
+            └── zip_archive
+                └── libzip
+```
+
+### `zip_archive`
+
+文件：
+
+```text
+include/zip_archive.hpp
+src/zip_archive.cpp
+```
+
+负责封装 libzip，提供以下能力：
+
+- 打开和关闭 ZIP 归档；
+- 读取 EPUB 内部文件；
+- 隐藏 `zip_t`、`zip_file_t` 等 libzip 类型。
+
+这一层只理解 ZIP，不理解 EPUB。
+
+### `epub_parser`
+
+文件：
+
+```text
+include/epub_parser.hpp
+src/epub_parser.cpp
+```
+
+负责解析 EPUB 内部结构：
+
+```text
+META-INF/container.xml
+    └── content.opf
+        ├── metadata
+        ├── manifest
+        │   └── toc.ncx（EPUB 2 目录资源）
+        └── spine
+            └── itemref（默认阅读顺序）
+```
+
+解析结果保存在项目自己的数据结构中：
+
+```cpp
+struct parsed_book {
+    std::string opf_path;
+    epub_metadata metadata;
+    epub_manifest manifest;
+    epub_spine spine;
+    epub_toc toc;
+};
+```
+
+该层直接依赖 pugixml，但不向上层暴露 pugixml 类型。
+
+### `epub_book`
+
+文件：
+
+```text
+include/epub_book.hpp
+src/epub_book.cpp
+```
+
+表示一本已经打开的 EPUB，负责保存：
+
+- EPUB 文件归档；
+- metadata；
+- manifest；
+- spine；
+- toc；
+- 按 spine 顺序读取的原始章节内容。
+
+`epub_book::open()` 负责打开文件并解析 `content.opf`。`epub_book::read()` 负责读取 spine 引用的资源。
+
+### `epub`
+
+文件：
+
+```text
+include/epub.hpp
+src/epub.cpp
+```
+
+`epub` 是多本书的管理器，负责：
+
+- 打开一本 EPUB；
+- 扫描目录中的 EPUB 文件；
+- 根据规范化路径缓存已经打开的书籍；
+- 管理 `eb_t` 借用句柄的生命周期。
+
+```cpp
+using eb_t = epub_book*;
+```
+
+`eb_t` 的所有权属于 `epub`，调用者不需要手动释放。
+
+### `ui::library`
+
+文件：
+
+```text
+include/ui/library.hpp
+src/ui/library.cpp
+```
+
+负责书库界面及其状态：
+
+- 书籍列表；
+- 当前选中书籍；
+- 书名、作者、语言、章节数量的显示；
+- 书籍选择事件。
+
+### `ui::reader`
+
+文件：
+
+```text
+include/ui/reader.hpp
+src/ui/reader.cpp
+```
+
+负责阅读界面及其状态：
+
+- 当前书籍内容；
+- UTF-8 换行；
+- 页面索引；
+- 当前页；
+- TOC 显示、选择和滚动；
+- 当前目录高亮；
+- 阅读区域和目录区域的焦点切换。
+
+目前 TOC 与内容资源的部分绑定逻辑仍位于 `ui::reader` 中。后续应将 `TOC → manifest/spine/content` 的 EPUB 语义绑定移动到 EPUB 内容层，而将 `content offset → page` 保留在阅读排版层。
+
+### `ui::application`
+
+文件：
+
+```text
+include/ui/application.hpp
+src/ui/application.cpp
+```
+
+负责：
+
+- 创建 FTXUI 全屏循环；
+- 在 `library` 和 `reader` 之间切换；
+- 转发键盘事件；
+- 管理当前阅读器实例。
+
+## 构建
+
+需要先安装 CMake、C++ 编译器和 vcpkg。
+
+在项目根目录执行：
+
+```bash
+cmake -S . -B build \
+  -DCMAKE_TOOLCHAIN_FILE=/path/to/vcpkg/scripts/buildsystems/vcpkg.cmake \
+  -DVCPKG_TARGET_TRIPLET=x64-linux
+
+cmake --build build --parallel
+```
+
+其中 `/path/to/vcpkg` 替换为本机的 vcpkg 路径。项目当前使用的依赖由 `vcpkg.json` 自动安装。
+
+VS Code 使用 CMake Tools 时，需要保证 `.vscode/settings.json` 中的 `CMAKE_TOOLCHAIN_FILE` 指向本机实际的 vcpkg 路径。
+
+## 使用
+
+运行程序时，可以将 EPUB 书库目录作为第一个参数：
+
+```bash
+./build/main /path/to/epub
+```
+
+程序会扫描该目录的第一层，并加载其中扩展名为 `.epub` 的文件。
+
+如果不传参数，当前程序会使用 `src/main.cpp` 中配置的默认目录。这个默认路径目前是开发环境路径，部署前应修改为更合适的默认值。
+
+### 书库界面
+
+```text
+↑/↓ 或 j/k   选择书籍
+Enter         进入阅读
+q             退出
+Esc           退出
+```
+
+### 阅读界面
+
+```text
+↑/↓ 或 j/k   选择 TOC，并立即切换阅读页面；焦点仍留在 TOC
+←            从 TOC 进入阅读栏，并使用当前选择的 TOC 页面
+←/→          在阅读栏中翻页
+Space         从阅读栏返回 TOC 栏
+Esc           返回书库
+q             退出程序
+```
+
+## TODO
+
+### EPUB 内容层
+
+- 将 TOC 与 manifest、spine、content 的稳定绑定移动到 EPUB 层；
+- 支持 EPUB 3 `nav.xhtml`；
+- 解析 XHTML/HTML 文档并提取正文文本；
+- 处理 HTML 实体、段落、标题、换行和列表；
+- 支持 fragment 到真实 HTML 节点的准确定位；
+- 处理 EPUB 编码和异常文件。
+
+### 阅读器排版层
+
+- 将排版输入从原始 XHTML 改为结构化文档；
+- 支持章节级阅读位置；
+- 优化窗口大小变化时的重排版；
+- 保存和恢复当前页；
+- 实现书签；
+- 实现章节跳转和阅读进度。
+
+### TUI 层
+
+- 优化目录和正文的配色；
+- 增加状态栏和阅读进度显示；
+- 增加搜索界面；
+- 支持鼠标操作；
+- 优化窄终端窗口下的布局。
+
+### 其他功能
+
+- 建立测试 EPUB fixture；
+- 增加解析层单元测试；
+- 增加 EPUB 解析错误提示；
+- 支持书库数据库或缓存；
+- 设计下载器和网络缓存。
